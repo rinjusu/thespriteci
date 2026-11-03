@@ -1,0 +1,122 @@
+# ============================================================
+# NOTE: This compiles the source yourself (allowed by the Aseprite
+# EULA for personal use). Don't re-upload or share the built files.
+# ============================================================
+
+name: Build Aseprite (free)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Aseprite tag to build, e.g. v1.3.14 (leave empty = latest dev build, recommended)"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runs_on: windows-latest
+            skia_asset: Skia-Windows-Release-x64.zip
+            skia_lib_dir: out/Release-x64
+            skia_lib: skia.lib
+            extra_flags: ""
+            pkg: aseprite-windows-x64.zip
+          - name: Linux x64
+            runs_on: ubuntu-24.04
+            skia_asset: Skia-Linux-Release-x64.zip
+            skia_lib_dir: out/Release-x64
+            skia_lib: libskia.a
+            extra_flags: "-DCMAKE_CXX_FLAGS:STRING=-stdlib=libstdc++ -DCMAKE_EXE_LINKER_FLAGS:STRING=-stdlib=libstdc++"
+            pkg: aseprite-linux-x64.tar.gz
+          - name: macOS Apple Silicon
+            runs_on: macos-latest
+            skia_asset: Skia-macOS-Release-arm64.zip
+            skia_lib_dir: out/Release-arm64
+            skia_lib: libskia.a
+            extra_flags: "-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DPNG_ARM_NEON:STRING=on"
+            pkg: aseprite-macos-arm64.zip
+
+    steps:
+      - name: Get Aseprite source
+        uses: actions/checkout@v4
+        with:
+          repository: aseprite/aseprite
+          ref: ${{ github.event.inputs.version != '' && github.event.inputs.version || 'main' }}
+          submodules: recursive
+          path: aseprite
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ clang cmake ninja-build unzip libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev
+
+      - name: Set up MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Download prebuilt Skia (latest release)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo aseprite/skia --pattern "${{ matrix.skia_asset }}" --output skia.zip
+          python -m zipfile -e skia.zip skia/
+          rm skia.zip
+
+      - name: Configure and build
+        shell: bash
+        run: |
+          WS="$GITHUB_WORKSPACE"
+          EXTRA="${{ matrix.extra_flags }}"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            export CC=clang
+            export CXX=clang++
+          fi
+          cmake -S aseprite -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DLAF_BACKEND=skia \
+            -DSKIA_DIR="$WS/skia" \
+            -DSKIA_LIBRARY_DIR="$WS/skia/${{ matrix.skia_lib_dir }}" \
+            -DSKIA_LIBRARY="$WS/skia/${{ matrix.skia_lib_dir }}/${{ matrix.skia_lib }}" \
+            $EXTRA
+          cmake --build build
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd build/bin
+          7z a -tzip "$GITHUB_WORKSPACE/${{ matrix.pkg }}" aseprite.exe data
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cd build/bin
+          tar czf "$GITHUB_WORKSPACE/${{ matrix.pkg }}" aseprite data
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cd build/bin
+          if [ -d aseprite.app ]; then
+            zip -r -q -y "$GITHUB_WORKSPACE/${{ matrix.pkg }}" aseprite.app
+          else
+            zip -r -q -y "$GITHUB_WORKSPACE/${{ matrix.pkg }}" aseprite data
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.pkg }}
+          path: ${{ matrix.pkg }}
